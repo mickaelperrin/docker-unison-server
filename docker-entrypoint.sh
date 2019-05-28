@@ -30,7 +30,7 @@ if [ "$1" == 'unison' ]; then
       unison_user=root
     else
       unison_user=unison
-      adduser -u "$uid" -h $SYNC_DIR unison
+      adduser -u "$uid" -D -h $SYNC_DIR unison
     fi
 
     # Gracefully stop the process on 'docker stop'
