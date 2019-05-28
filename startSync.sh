@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
+set -e
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 LOCAL=true
 CONTAINER_NAME=
 SERVER=
 SERVER_IP=
-SSH_CMD=eval
+SSH_CMD=
+SUDO_PASSWORD=
+SUDO=true
+DEBUG=
+UNISON_DEBUG=
+NO_RUN=false
 
 parseArgs() {
   while test $# -gt 0; do
@@ -13,10 +19,10 @@ parseArgs() {
       --server*)
         LOCAL=false
         SERVER="$(echo $1 | sed -e 's/^[^=]*=//g')"
-        SSH_CMD="ssh $1"
+        SSH_CMD="ssh $SERVER"
         shift
         ;;
-      --server-ip*)
+      --ip*)
         SERVER_IP="$(echo $1 | sed -e 's/^[^=]*=//g')"
         shift
         ;;
@@ -24,17 +30,32 @@ parseArgs() {
         CONTAINER_NAME="$(echo $1 | sed -e 's/^[^=]*=//g')"
         shift
         ;;
+      --no-sudo)
+        SUDO=
+        shift
+        ;;
+      --debug)
+        DEBUG=true
+        UNISON_DEBUG=" -debug all"
+        shift
+        ;;
+      --no-run)
+        NO_RUN=true
+        shift
+        ;;
       *)
-        echo "$1"
         break
         ;;
     esac
 done
 
-if [ -z "$SERVER" ]; then
-  SERVER_IP=127.0.0.1
-fi
+}
 
+debug() {
+  if [ "$DEBUG" = "true" ]; then
+    echo
+    echo "$*"
+  fi
 }
 
 checks() {
@@ -50,27 +71,78 @@ checks() {
   fi
 
   # Check that unison container is running
-  IS_CONTAINER_RUNNING=$(${SSH_CMD} "docker inspect -f {{.State.Running}} $CONTAINER_NAME")
-  if [ "$IS_CONTAINER_RUNNING" != 'true' ]; then
+  if ! checkContainerIsRunning; then
     echo "Container $CONTAINER_NAME is not running. Exiting"
     exit 1
   fi
 
   # Get remote unison port
-  REMOTE_PORT=$(${SSH_CMD} "docker inspect --format='{{(index (index .NetworkSettings.Ports \"5000/tcp\") 0).HostPort}}' $CONTAINER_NAME")
-  echo "Unison is running on port ${REMOTE_PORT} on remote server"
+  REMOTE_PORT=$(getUnisonPort)
+  debug "REMOTE_PORT=${REMOTE_PORT}"
 
-  UNISON_ARGS=$(${SSH_CMD} "docker exec $CONTAINER_NAME bash -c 'echo \$UNISON_ARGS'")
+  UNISON_ARGS=$(getUnisonSyncArgs)
+  debug "UNISON_ARGS=$UNISON_ARGS"
+
+  if [ -z "$SERVER_IP" ]; then
+    SERVER_IP=$(resolve $SERVER)
+  fi
+}
+
+
+resolve() {
+  if [ "$OSTYPE" = "linux-gnu" ]; then
+    getent hosts $1 | awk '{ print $1 }'
+  elif [[ "$OSTYPE" == "darwin"* ]]; then
+    dscacheutil -q host -a name $1 | grep ip_address | awk '{print $2}'
+  fi
+}
+
+run() {
+  if [ ! -z "$SERVER" ]; then
+    if [ ! -z "$SUDO" ]; then
+      CMDS=$(cat <<CMD
+echo "$SUDO_PASSWORD" | sudo -S $@
+CMD
+)
+    else
+      CMDS="$*"
+    fi
+    ssh -o LogLevel=QUIET $SERVER "$CMDS"
+  else
+    eval "$*"
+  fi
+}
+
+checkContainerIsRunning() {
+  run "docker inspect -f {{.State.Running}} $CONTAINER_NAME > /dev/null"
+}
+
+getUnisonPort() {
+  run "docker inspect --format='{{(index (index .NetworkSettings.Ports \"5000/tcp\") 0).HostPort}}' $CONTAINER_NAME"
+}
+
+getUnisonSyncArgs() {
+  run "docker exec $CONTAINER_NAME bash -c 'echo \$UNISON_ARGS'"
 }
 
 start() {
-  UNISON_COMMAND="unison -auto -batch -repeat watch ${EXCLUDE_CONFIG//\"/} ${SYNC_DIR:-$(pwd)} socket://${SERVER_IP:-$SERVER}:${REMOTE_PORT}"
+  UNISON_COMMAND="/usr/local/bin/unison $UNISON_DEBUG ${UNISON_ARGS//\"/} -auto -batch -repeat watch $(pwd) socket://${SERVER_IP}:${REMOTE_PORT}"
+  debug "$UNISON_COMMAND"
+  $NO_RUN || eval "$UNISON_COMMAND"
+}
+
+askForSudoPassword() {
+  if [ ! -z "${SUDO_PASSWORD}" ]; then
+    return
+  fi
+
+  read -s -p "Sudo password for $SERVER:" SUDO_PASSWORD
   echo
-  echo "Running unison with the following command:"
-  echo "$UNISON_COMMAND"
-  eval $UNISON_COMMAND
 }
 
 parseArgs "$@"
+$SUDO && askForSudoPassword
 checks
 start
+
+
