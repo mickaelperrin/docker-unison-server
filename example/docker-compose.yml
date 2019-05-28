@@ -1,0 +1,20 @@
+version: '2'
+
+services:
+  app:
+    image: alpine:edge
+    command: /bin/true
+    volumes:
+      - ./app:/app
+  unison_app:
+    image: mickaelperrin/unison:2.51.2
+    build: ..
+    ports:
+      - 5000
+    environment:
+      - SYNC_DIR=/app
+      - TZ=Europe/Paris
+      - UNISON_ARGS=" -ignore='Name .git' -ignore='Name node_modules' -ignore='Name .idea' -ignore='Path log' -ignore='Path keyrings' -prefer newer -copyonconflict"
+    volumes_from:
+      - app
+
